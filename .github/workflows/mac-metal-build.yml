@@ -75,25 +75,34 @@ jobs:
 
       - name: Smoke test
         run: |
-          ls -lh build/audiocpp_cli
-          file build/audiocpp_cli
-          ./build/audiocpp_cli --version || true
+          # the linker emits build/bin/audiocpp_cli; locate it robustly
+          CLI_BIN="$(find build -type f -name audiocpp_cli | head -1)"
+          if [ -z "$CLI_BIN" ]; then
+            echo "audiocpp_cli not found under build/"; find build -name 'audiocpp_cli*'; exit 1
+          fi
+          echo "CLI_BIN=$CLI_BIN" >> "$GITHUB_ENV"
+          echo "binary: $CLI_BIN"
+          ls -lh "$CLI_BIN"
+          file "$CLI_BIN"
+          "$CLI_BIN" --version || true
           echo "--- loaders ---"
-          ./build/audiocpp_cli --list-loaders --json 2>/dev/null | python3 -m json.tool | head -60 || true
+          "$CLI_BIN" --list-loaders --json 2>/dev/null | python3 -m json.tool | head -60 || true
 
       - name: Package
         run: |
+          CLI_BIN="${CLI_BIN:?binary path not set}"
           mkdir -p staging
-          cp build/audiocpp_cli staging/
+          cp "$CLI_BIN" staging/
           strip staging/audiocpp_cli || true
           {
             echo "audiocpp_cli - macOS arm64, Metal backend (self-contained)"
             echo "build_type: $BUILD_TYPE_INPUT"
             echo "model_set:  $MODEL_SET_INPUT"
+            echo "binary:     $CLI_BIN"
             echo "commit:     $(git rev-parse --short HEAD)  $(git log -1 --format=%ci)"
             echo "runner:     $(uname -m), macOS $(sw_vers -productVersion)"
             echo "---"
-            ./build/audiocpp_cli --version 2>/dev/null || true
+            "$CLI_BIN" --version 2>/dev/null || true
           } > staging/BUILD_INFO.txt
           ( cd staging && zip -j "audiocpp_cli-mac-arm64-${MODEL_SET_INPUT}.zip" audiocpp_cli BUILD_INFO.txt )
           ls -lh staging/
