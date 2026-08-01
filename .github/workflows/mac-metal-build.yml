@@ -1,0 +1,107 @@
+# Build a self-contained macOS arm64 (Apple Silicon) audiocpp_cli with the
+# ggml Metal backend enabled, for a chosen model composite, and upload the
+# binary as a downloadable artifact.
+#
+# Why this exists: upstream only ships Windows prebuilt binaries and a
+# Homebrew formula. The upstream mac-build.yml is CPU-only/Debug with no
+# artifact. This workflow produces a fast Metal build you can just download.
+#
+# Drop into your fork at:  .github/workflows/mac-metal-build.yml
+# Then: Actions tab -> enable workflows -> "Run workflow".
+# Free on a PUBLIC fork (macOS runners are free for public repositories).
+
+name: build-mac-metal
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_set:
+        description: "Which models to compile in (index_tts2 = small & fast build)"
+        type: choice
+        options:
+          - index_tts2
+          - core
+          - full
+        default: index_tts2
+      build_type:
+        description: "CMake build type"
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+        default: Release
+
+jobs:
+  build:
+    name: macOS arm64 Metal
+    runs-on: macos-14              # Apple Silicon (M1) runner
+    env:
+      MODEL_SET_INPUT: ${{ inputs.model_set || 'index_tts2' }}
+      BUILD_TYPE_INPUT: ${{ inputs.build_type || 'Release' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Environment
+        run: |
+          echo "arch: $(uname -m)"
+          sw_vers
+          xcrun --sdk macosx --find metal
+
+      - name: Configure (CMake)
+        run: |
+          if [ "$MODEL_SET_INPUT" = "index_tts2" ]; then
+            MSET="custom"; MODELS="index_tts2"
+          else
+            MSET="$MODEL_SET_INPUT"; MODELS=""
+          fi
+          echo "model_set=$MSET  models=$MODELS  build_type=$BUILD_TYPE_INPUT"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE="$BUILD_TYPE_INPUT" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DENGINE_ENABLE_CUDA=OFF \
+            -DENGINE_ENABLE_VULKAN=OFF \
+            -DENGINE_ENABLE_METAL=ON \
+            -DENGINE_ENABLE_OPENMP=OFF \
+            -DENGINE_ENABLE_LLAMAFILE=ON \
+            -DENGINE_ENABLE_NATIVE_CPU=ON \
+            -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DAUDIOCPP_MODEL_SET="$MSET" \
+            -DAUDIOCPP_MODELS="$MODELS"
+
+      - name: Build audiocpp_cli
+        run: |
+          cmake --build build --parallel "$(sysctl -n hw.logicalcpu)" --target audiocpp_cli
+
+      - name: Smoke test
+        run: |
+          ls -lh build/audiocpp_cli
+          file build/audiocpp_cli
+          ./build/audiocpp_cli --version || true
+          echo "--- loaders ---"
+          ./build/audiocpp_cli --list-loaders --json 2>/dev/null | python3 -m json.tool | head -60 || true
+
+      - name: Package
+        run: |
+          mkdir -p staging
+          cp build/audiocpp_cli staging/
+          strip staging/audiocpp_cli || true
+          {
+            echo "audiocpp_cli - macOS arm64, Metal backend (self-contained)"
+            echo "build_type: $BUILD_TYPE_INPUT"
+            echo "model_set:  $MODEL_SET_INPUT"
+            echo "commit:     $(git rev-parse --short HEAD)  $(git log -1 --format=%ci)"
+            echo "runner:     $(uname -m), macOS $(sw_vers -productVersion)"
+            echo "---"
+            ./build/audiocpp_cli --version 2>/dev/null || true
+          } > staging/BUILD_INFO.txt
+          ( cd staging && zip -j "audiocpp_cli-mac-arm64-${MODEL_SET_INPUT}.zip" audiocpp_cli BUILD_INFO.txt )
+          ls -lh staging/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: audiocpp_cli-mac-arm64-${{ env.MODEL_SET_INPUT }}
+          path: staging/audiocpp_cli-mac-arm64-*.zip
+          if-no-files-found: error
+          retention-days: 30
